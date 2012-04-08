@@ -14,12 +14,14 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include "sensor_cmd.h"
 
-#define CMD_NAME	"serial_proxyd"
-#define PORT_STR	"26851"
-#define BAUDRATE	B115200
+#define CMD_NAME		"lemon_squashd"
+#define REMOCON_PORT_STR	"26851"
+#define SENSOR_PORT_STR		"26852"
+#define BAUDRATE		B115200
 
-#undef VERBOSE
+#define VERBOSE
 
 #ifdef VERBOSE
 #define debug_syslog	syslog
@@ -33,9 +35,11 @@ static struct {
 
 struct server_fds {
 	fd_set readfds;
-	int fd_sock;
-	int fd_conn;
 	int fd_ser;
+	int fd_sock_rm;	/* REMOCON server socket */
+	int fd_conn_rm;	/* REMOCON client connection */
+	int fd_sock_sn;	/* SENSOR server socket */
+	int fd_conn_sn;	/* SENSOR client connection */
 };
 
 volatile int had_signal = 0;
@@ -91,7 +95,8 @@ static int daemonize(void)
 	return 0;
 }
 
-static int serial_open(const char *devname, struct termios *tio_old)
+static int serial_open(struct server_fds *fds,
+		       const char *devname, struct termios *tio_old)
 {
 	struct termios tio_new;
 	int fd;
@@ -115,16 +120,17 @@ static int serial_open(const char *devname, struct termios *tio_old)
 	tcflush(fd, TCIFLUSH);
 	tcsetattr(fd, TCSANOW, &tio_new);
 
-	return fd;
+	fds->fd_ser = fd;
+	return 0;
 }
 
-static int serial_close(int fd, const struct termios *tio_old)
+static int serial_close(struct server_fds *fds, const struct termios *tio_old)
 {
-	tcsetattr(fd, TCSANOW, tio_old);
-	return close(fd);
+	tcsetattr(fds->fd_ser, TCSANOW, tio_old);
+	return close(fds->fd_ser);
 }
 
-static int server_open(void)
+static int server_open(struct server_fds *fds)
 {
 	int fd;
 	struct addrinfo ai_hint, *aip;
@@ -139,7 +145,10 @@ static int server_open(void)
 	ai_hint.ai_addr = NULL;
 	ai_hint.ai_next = NULL;
 
-	if ((r = getaddrinfo(NULL, PORT_STR, &ai_hint, &aip)) < 0) {
+	/*
+	 * REMOCON port
+	 */
+	if ((r = getaddrinfo(NULL, REMOCON_PORT_STR, &ai_hint, &aip)) < 0) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(r));
 		return -1;
 	}
@@ -161,73 +170,192 @@ static int server_open(void)
 	if (listen(fd, 1) < 0) {
 		fprintf(stderr, "listen() failed\n");
 		close(fd);
-		return 1;
+		return -1;
 	}
 
-	return fd;
-}
+	fds->fd_sock_rm = fd;
 
-static int server_close(int fd)
-{
-	close(fd);
+	/*
+	 * SENSOR port
+	 */
+	if ((r = getaddrinfo(NULL, SENSOR_PORT_STR, &ai_hint, &aip)) < 0) {
+		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(r));
+		return -1;
+	}
+
+	if ((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+		fprintf(stderr, "socket() failed\n");
+		return -1;
+	}
+
+	if (bind(fd, aip->ai_addr, aip->ai_addrlen) < 0) {
+		fprintf(stderr, "bind() failed\n");
+		close(fd);
+		freeaddrinfo(aip);
+		return -1;
+	}
+
+	freeaddrinfo(aip);
+
+	if (listen(fd, 1) < 0) {
+		fprintf(stderr, "listen() failed\n");
+		close(fd);
+		return -1;
+	}
+
+	fds->fd_sock_sn = fd;
+
 	return 0;
 }
 
-static int read_all_fds(fd_set *testfds, struct server_fds *fds)
+static int server_close(struct server_fds *fds)
+{
+	int r1, r2;
+
+	r1 = close(fds->fd_sock_rm);
+	r2 = close(fds->fd_sock_sn);
+	return (r1 < 0) ? r1 : r2;
+}
+
+static int read_server_sock_rm(struct server_fds *fds)
+{
+	struct sockaddr_in addr;
+	size_t len = sizeof(struct sockaddr_in);
+
+	debug_syslog(LOG_INFO, "connection from remocon client\n");
+	fds->fd_conn_rm =
+		accept(fds->fd_sock_rm, (struct sockaddr *)&addr, &len);
+	if (fds->fd_conn_rm < 0) {
+		syslog(LOG_ERR, "accept() failed\n");
+		return -1;
+	}
+	debug_syslog(LOG_INFO, "fd_conn_rm = %d\n", fds->fd_conn_rm);
+	FD_CLR(fds->fd_sock_rm, &fds->readfds);
+	FD_SET(fds->fd_conn_rm, &fds->readfds);
+	return 0;
+}
+
+static int read_server_sock_sn(struct server_fds *fds)
+{
+	struct sockaddr_in addr;
+	size_t len = sizeof(struct sockaddr_in);
+
+	debug_syslog(LOG_INFO, "connection from sensor client\n");
+	fds->fd_conn_sn =
+		accept(fds->fd_sock_sn, (struct sockaddr *)&addr, &len);
+	if (fds->fd_conn_sn < 0) {
+		syslog(LOG_ERR, "accept() failed\n");
+		return -1;
+	}
+	debug_syslog(LOG_INFO, "fd_conn_sn = %d\n", fds->fd_conn_sn);
+	FD_CLR(fds->fd_sock_sn, &fds->readfds);
+	FD_SET(fds->fd_conn_sn, &fds->readfds);
+	return 0;
+}
+
+/* forwarding remocon client -> serial */
+static int read_client_conn_rm(struct server_fds *fds)
 {
 	char buf[256];
+	ssize_t r_len = recv(fds->fd_conn_rm, buf, sizeof(buf), 0);
 
-	if (FD_ISSET(fds->fd_sock, testfds)) {
-		struct sockaddr_in addr;
-		size_t len = sizeof(struct sockaddr_in);
-
-		debug_syslog(LOG_INFO, "connection from client\n");
-		fds->fd_conn =
-			accept(fds->fd_sock, (struct sockaddr *)&addr, &len);
-		if (fds->fd_conn < 0) {
-			syslog(LOG_ERR, "accept() failed\n");
+	debug_syslog(LOG_INFO, "data at fd_conn_rm\n");
+	if (r_len <= 0) {
+		if (r_len < 0)	/* maybe client died? */
+			syslog(LOG_ERR, "recv() failed\n");
+		else
+			debug_syslog(LOG_INFO, "connection closed\n");
+		close(fds->fd_conn_rm);
+		FD_CLR(fds->fd_conn_rm, &fds->readfds);
+		fds->fd_conn_rm = -1;
+		FD_SET(fds->fd_sock_rm, &fds->readfds);
+	} else {
+		/* FIXME: command check? */
+		if (write(fds->fd_ser, buf, r_len) < r_len) {
+			syslog(LOG_ERR, "write() failed\n");
 			return -1;
 		}
-		debug_syslog(LOG_INFO, "fd_conn = %d\n", fds->fd_conn);
-		FD_CLR(fds->fd_sock, &fds->readfds);
-		FD_SET(fds->fd_conn, &fds->readfds);
 	}
-	if ((fds->fd_conn >= 0) && FD_ISSET(fds->fd_conn, testfds)) {
-		/* forwarding client -> serial */
-		ssize_t r_len = recv(fds->fd_conn, buf, sizeof(buf), 0);
 
-		debug_syslog(LOG_INFO, "data at fd_conn\n");
-		if (r_len <= 0) {
-			if (r_len < 0)	/* maybe client died? */
-				syslog(LOG_ERR, "recv() failed\n");
-			else
-				debug_syslog(LOG_INFO, "connection closed\n");
-			close(fds->fd_conn);
-			FD_CLR(fds->fd_conn, &fds->readfds);
-			fds->fd_conn = -1;
-			FD_SET(fds->fd_sock, &fds->readfds);
+	return 0;
+}
+
+/* forwarding sensor client -> serial */
+static int read_client_conn_sn(struct server_fds *fds)
+{
+	char cmd_r, cmd_s;
+	ssize_t r_len = recv(fds->fd_conn_sn, &cmd_r, 1, 0);
+
+	debug_syslog(LOG_INFO, "data at fd_conn_sn\n");
+	if (r_len <= 0) {
+		if (r_len < 0)	/* maybe client died? */
+			syslog(LOG_ERR, "recv() failed\n");
+		else
+			debug_syslog(LOG_INFO, "connection closed\n");
+		close(fds->fd_conn_sn);
+		FD_CLR(fds->fd_conn_sn, &fds->readfds);
+		fds->fd_conn_sn = -1;
+		FD_SET(fds->fd_sock_sn, &fds->readfds);
+	} else {
+		switch (cmd_r) {
+		case SENSOR_CMD_START:
+			cmd_s = 'Q';
+			break;
+		case SENSOR_CMD_ACTIVE:
+			cmd_s = 'A';
+			break;
+		case SENSOR_CMD_INACTIVE:
+			cmd_s = 'B';
+			break;
+		default:
+			syslog(LOG_ERR, "unknown command %d\n", cmd_r);
+			return 0;
+		}
+		if (write(fds->fd_ser, &cmd_s, 1) < 1) {
+			syslog(LOG_ERR, "write() failed\n");
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+/* forwarding serial -> client */
+static int read_serial(struct server_fds *fds)
+{
+	char buf[256];
+	ssize_t r_len = read(fds->fd_ser, buf, sizeof(buf));
+
+	debug_syslog(LOG_INFO, "data at fd_ser\n");
+	if (r_len < 0) {
+		syslog(LOG_ERR, "read() failed\n");
+		return -1;
+	}
+
+	/* FIXME: more strict data parsing */
+	if ((r_len == 1) && (buf[0] == 'P')) {
+		if (fds->fd_conn_sn < 0) {
+			syslog(LOG_ERR,
+			       "data at fd_ser, but no connection with"
+			       " sensor client. discarding.\n");
+			syslog(LOG_ERR,
+			       "data[0] = 0x%02x\n", buf[0]);
 		} else {
-			if (write(fds->fd_ser, buf, r_len) < r_len) {
-				syslog(LOG_ERR, "write() failed\n");
+			char cmd_s = SENSOR_CMD_DETECTED;
+			if (send(fds->fd_conn_sn, &cmd_s, 1, 0) < 1) {
+				syslog(LOG_ERR, "send() failed\n");
 				return -1;
 			}
 		}
-	}
-	if (FD_ISSET(fds->fd_ser, testfds)) {
-		/* forwarding serial -> client */
-		ssize_t r_len = read(fds->fd_ser, buf, sizeof(buf));
-
-		debug_syslog(LOG_INFO, "data at fd_ser\n");
-		if (r_len < 0) {
-			syslog(LOG_ERR, "recv() failed\n");
-			return -1;
-		}
-		if (fds->fd_conn < 0) {
+	} else {
+		if (fds->fd_conn_rm < 0) {
 			syslog(LOG_ERR,
-			       "data at fd_ser, but no connection"
-			       " with client. discarding.\n");
+			       "data at fd_ser, but no connection with"
+			       " remocon client. discarding.\n");
+			syslog(LOG_ERR,
+			       "data[0] = 0x%02x\n", buf[0]);
 		} else {
-			if (send(fds->fd_conn, buf, r_len, 0) < r_len) {
+			if (send(fds->fd_conn_rm, buf, r_len, 0) < r_len) {
 				syslog(LOG_ERR, "send() failed\n");
 				return -1;
 			}
@@ -237,14 +365,43 @@ static int read_all_fds(fd_set *testfds, struct server_fds *fds)
 	return 0;
 }
 
+static int read_all_fds(fd_set *testfds, struct server_fds *fds)
+{
+	if (FD_ISSET(fds->fd_sock_rm, testfds)) {
+		if (read_server_sock_rm(fds) < 0)
+			return -1;
+	}
+	if (FD_ISSET(fds->fd_sock_sn, testfds)) {
+		if (read_server_sock_sn(fds) < 0)
+			return -1;
+	}
+	if ((fds->fd_conn_rm >= 0) && FD_ISSET(fds->fd_conn_rm, testfds)) {
+		if (read_client_conn_rm(fds) < 0)
+			return -1;
+	}
+	if ((fds->fd_conn_sn >= 0) && FD_ISSET(fds->fd_conn_sn, testfds)) {
+		if (read_client_conn_sn(fds) < 0)
+			return -1;
+	}
+	if (FD_ISSET(fds->fd_ser, testfds)) {
+		if (read_serial(fds) < 0)
+			return -1;
+	}
+
+	return 0;
+}
+
 static void server(struct server_fds *fds)
 {
 	syslog(LOG_INFO, "start\n");
 
+	sleep(2);	/* wait for arduino serial setup */
+
 	/* initialize readfds */
 	FD_ZERO(&fds->readfds);
 	FD_SET(fds->fd_ser, &fds->readfds);
-	FD_SET(fds->fd_sock, &fds->readfds);
+	FD_SET(fds->fd_sock_rm, &fds->readfds);
+	FD_SET(fds->fd_sock_sn, &fds->readfds);
 
 	for (;;) {
 		fd_set rfds = fds->readfds;
@@ -311,19 +468,21 @@ err:
 int main(int argc, char **argv)
 {
 	struct server_fds fds = {
-		.fd_sock = -1,
-		.fd_conn = -1,
 		.fd_ser = -1,
+		.fd_sock_rm = -1,
+		.fd_conn_rm = -1,
+		.fd_sock_sn = -1,
+		.fd_conn_sn = -1,
 	};
 	struct termios tio_old;
 
 	if (parse_arg(argc, argv) < 0)
 		return 1;
 
-	if ((fds.fd_ser = serial_open(app.dev_name, &tio_old)) < 0)
+	if (serial_open(&fds, app.dev_name, &tio_old) < 0)
 		return 1;
 
-	if ((fds.fd_sock = server_open()) < 0)
+	if (server_open(&fds) < 0)
 		return 1;
 
 	daemonize();
@@ -332,8 +491,8 @@ int main(int argc, char **argv)
 	server(&fds);
 	closelog();
 
-	server_close(fds.fd_sock);
-	serial_close(fds.fd_ser, &tio_old);
+	server_close(&fds);
+	serial_close(&fds, &tio_old);
 
 	return 0;
 }

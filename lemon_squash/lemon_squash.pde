@@ -1,9 +1,12 @@
 //
 // remocon (compatible with Buffalo RemoteStation)
+// + ranging sensor
 //
-#define PIN_IR_IN	8
-#define PIN_IR_OUT	12
-#define PIN_LED		13
+#define PIN_IR_IN		 8
+#define PIN_IR_OUT		12
+#define PIN_GENERIC_LED		13
+#define PIN_ACTIVE_LED		 7
+#define ANALOG_PIN_RANGE_IN	 0
 
 #define REMOCON_CMD_DATA_COMPLETION	'E'
 #define REMOCON_CMD_LED_OK		'O'
@@ -15,18 +18,82 @@
 #define REMOCON_CMD_TRANSMIT		't'
 #define REMOCON_CMD_CHANNEL(ch)		('0' + (ch))
 
+#define SQUASH_CMD_SENSOR_START		'Q'	/* input */
+#define SQUASH_CMD_SENSOR_DETECTED	'P'	/* output */
+#define SQUASH_CMD_ACTIVE		'A'	/* input */
+#define SQUASH_CMD_INACTIVE		'B'	/* input */
+
 #define REMOCON_DATA_LEN	240
 
 /*--------------------------------------------------------------------*/
 static void led_blink(int n, int len)
 {
 	for (int i = 0; i < n; i++) {
-		digitalWrite(PIN_LED, HIGH);
+		digitalWrite(PIN_GENERIC_LED, HIGH);
 		delay(len);
-		digitalWrite(PIN_LED, LOW);
+		digitalWrite(PIN_GENERIC_LED, LOW);
 		delay(len);
 	}
 }
+
+/*--------------------------------------------------------------------*/
+class ranging_sensor {
+private:
+	bool enabled;
+	uint32_t prev_rise_micros;
+	uint8_t lv;
+public:
+	ranging_sensor() {
+		enabled = false;
+	}
+
+	void start() {
+		enabled = true;
+		lv = 0;
+	}
+	void stop() {
+		enabled = false;
+	}
+	void sense();
+};
+
+#define SENSOR_VAL_THRES	300
+#define SENSOR_DUR_THRES_US	700000
+
+void ranging_sensor::sense()
+{
+	char *c;
+	uint16_t val;
+	uint8_t *val_byte;
+
+	if (!enabled)
+		return;
+
+	val = analogRead(ANALOG_PIN_RANGE_IN);
+	if (val > SENSOR_VAL_THRES) {
+		uint32_t now_micros = micros();
+		if (lv == 0)
+			prev_rise_micros = now_micros;
+		else if (now_micros >= prev_rise_micros + SENSOR_DUR_THRES_US) {
+			Serial.print(SQUASH_CMD_SENSOR_DETECTED);
+			stop();
+		}
+		lv = HIGH;
+	} else {
+		lv = LOW;
+	}
+}
+
+static ranging_sensor g_rang;
+
+/*--------------------------------------------------------------------*/
+class active_indicator {
+public:
+	void activate() { digitalWrite(PIN_ACTIVE_LED, HIGH); }
+	void deactivate() { digitalWrite(PIN_ACTIVE_LED, LOW); }
+};
+
+static active_indicator g_aind;
 
 /*--------------------------------------------------------------------*/
 class ir_transmitter {
@@ -144,41 +211,55 @@ void state_machine::serial_check()
 
 	uint8_t c = Serial.read();
 
+	/* state independent */
+	if (c == SQUASH_CMD_SENSOR_START) {
+		g_rang.start();
+		return;
+	} else if (c == SQUASH_CMD_ACTIVE) {
+		g_aind.activate();
+		return;
+	} else if (c == SQUASH_CMD_INACTIVE) {
+		g_aind.deactivate();
+		return;
+	}
+
+	/* state dependent */
 	if (state == ST_NONE) {
 		if (c == REMOCON_CMD_LED) {
 			led_blink(1, 100);
 			Serial.print(REMOCON_CMD_LED_OK);
+			return;
 		} else if (c == REMOCON_CMD_TRANSMIT) {
 			Serial.print(REMOCON_CMD_OK);
 			state = ST_TRANSMIT_CH;
+			return;
 		} else if (c == REMOCON_CMD_RECEIVE) {
 			ir_receiver rc;
 			Serial.print(REMOCON_CMD_OK);
 			Serial.print(REMOCON_CMD_RECEIVE_DATA);
 			rc.receive();
 			Serial.print(REMOCON_CMD_DATA_COMPLETION);
-		} else
-			goto err;
+			return;
+		}
 	} else if (state == ST_TRANSMIT_CH) {
 		if ((c >= '1') && (c <= '4')) {
 			Serial.print(REMOCON_CMD_OK);
 			tr.reset();
 			state = ST_TRANSMIT;
-		} else
-			state = ST_NONE;
+			return;
+		}
 	} else if (state == ST_TRANSMIT) {
 		if (tr.push(c) == REMOCON_DATA_LEN) {
 			tr.transmit();
 			Serial.print(REMOCON_CMD_DATA_COMPLETION);
 			state = ST_NONE;
 		}
+		return;
 	}
 
-	return;
-
-err:
-	state = ST_NONE;
+	/* error. unknown command */
 	Serial.print('?');
+	state = ST_NONE;
 }
 
 /*--------------------------------------------------------------------*/
@@ -187,7 +268,8 @@ void setup()
 	Serial.begin(115200);
 	pinMode(PIN_IR_IN, INPUT);
 	pinMode(PIN_IR_OUT, OUTPUT);
-	pinMode(PIN_LED, OUTPUT);
+	pinMode(PIN_GENERIC_LED, OUTPUT);
+	pinMode(PIN_ACTIVE_LED, OUTPUT);
 }
 
 void loop()
@@ -195,4 +277,5 @@ void loop()
 	static state_machine st;
 
 	st.serial_check();
+	g_rang.sense();
 }
