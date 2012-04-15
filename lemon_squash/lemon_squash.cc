@@ -236,10 +236,6 @@ void state_machine::serial_check()
 				Serial.print(REMOCON_CMD_DATA_COMPLETION);
 			}
 			return;
-		case REMOCON_CMD_RECEIVE2:
-			Serial.print(REMOCON_CMD_OK);
-			state = ST_RECEIVE_SIZE;
-			return;
 		/* sensor commands */
 		case SQUASH_CMD_SENSOR_START:
 			g_rang.start();
