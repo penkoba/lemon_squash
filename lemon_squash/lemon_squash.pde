@@ -215,44 +215,52 @@ void state_machine::serial_check()
 
 	uint8_t c = Serial.read();
 
-	/* state independent */
-	if (c == SQUASH_CMD_SENSOR_START) {
-		g_rang.start();
-		return;
-	} else if (c == SQUASH_CMD_ACTIVE) {
-		g_aind.activate();
-		return;
-	} else if (c == SQUASH_CMD_INACTIVE) {
-		g_aind.deactivate();
-		return;
-	}
-
-	/* state dependent */
-	if (state == ST_NONE) {
-		if (c == REMOCON_CMD_LED) {
+	switch (state) {
+	case ST_NONE:
+		switch (c) {
+		/* remocon commands */
+		case REMOCON_CMD_LED:
 			led_blink(1, 100);
 			Serial.print(REMOCON_CMD_LED_OK);
 			return;
-		} else if (c == REMOCON_CMD_TRANSMIT) {
+		case REMOCON_CMD_TRANSMIT:
 			Serial.print(REMOCON_CMD_OK);
 			state = ST_TRANSMIT_CH;
 			return;
-		} else if (c == REMOCON_CMD_RECEIVE) {
-			ir_receiver rc;
+		case REMOCON_CMD_RECEIVE:
+			{
+				ir_receiver rc;
+				Serial.print(REMOCON_CMD_OK);
+				Serial.print(REMOCON_CMD_RECEIVE_DATA);
+				rc.receive();
+				Serial.print(REMOCON_CMD_DATA_COMPLETION);
+			}
+			return;
+		case REMOCON_CMD_RECEIVE2:
 			Serial.print(REMOCON_CMD_OK);
-			Serial.print(REMOCON_CMD_RECEIVE_DATA);
-			rc.receive();
-			Serial.print(REMOCON_CMD_DATA_COMPLETION);
+			state = ST_RECEIVE_SIZE;
+			return;
+		/* sensor commands */
+		case SQUASH_CMD_SENSOR_START:
+			g_rang.start();
+			return;
+		case SQUASH_CMD_ACTIVE:
+			g_aind.activate();
+			return;
+		case SQUASH_CMD_INACTIVE:
+			g_aind.deactivate();
 			return;
 		}
-	} else if (state == ST_TRANSMIT_CH) {
+		break;
+	case ST_TRANSMIT_CH:
 		if ((c >= '1') && (c <= '4')) {
 			Serial.print(REMOCON_CMD_OK);
 			tr.reset();
 			state = ST_TRANSMIT;
 			return;
 		}
-	} else if (state == ST_TRANSMIT) {
+		break;
+	case ST_TRANSMIT:
 		if (tr.push(c) == REMOCON_DATA_LEN) {
 			tr.transmit();
 			Serial.print(REMOCON_CMD_DATA_COMPLETION);
