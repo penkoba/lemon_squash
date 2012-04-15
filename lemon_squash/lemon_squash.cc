@@ -17,7 +17,9 @@
 #define REMOCON_CMD_RECEIVE_CANCEL	'c'
 #define REMOCON_CMD_LED			'i'
 #define REMOCON_CMD_RECEIVE		'r'
+#define REMOCON_CMD_RECEIVE2		's'
 #define REMOCON_CMD_TRANSMIT		't'
+#define REMOCON_CMD_TRANSMIT2		'u'
 #define REMOCON_CMD_CHANNEL(ch)		('0' + (ch))
 
 /* SENSOR: output */
@@ -27,7 +29,7 @@
 #define SQUASH_CMD_ACTIVE		'a'
 #define SQUASH_CMD_INACTIVE		'b'
 
-#define REMOCON_DATA_LEN	240
+#define PCOPRS1_DATA_LEN	240
 
 /*--------------------------------------------------------------------*/
 static void led_blink(int n, int len)
@@ -43,20 +45,20 @@ static void led_blink(int n, int len)
 /*--------------------------------------------------------------------*/
 class ranging_sensor {
 private:
-	bool enabled;
-	uint32_t prev_rise_micros;
-	uint8_t lv;
+	bool m_enabled;
+	uint32_t m_prev_rise_micros;
+	uint8_t m_lv;
 public:
 	ranging_sensor() {
-		enabled = false;
+		m_enabled = false;
 	}
 
 	void start() {
-		enabled = true;
-		lv = 0;
+		m_enabled = true;
+		m_lv = 0;
 	}
 	void stop() {
-		enabled = false;
+		m_enabled = false;
 	}
 	void sense();
 };
@@ -70,21 +72,21 @@ void ranging_sensor::sense()
 	uint16_t val;
 	uint8_t *val_byte;
 
-	if (!enabled)
+	if (!m_enabled)
 		return;
 
 	val = analogRead(ANALOG_PIN_RANGE_IN);
 	if (val > SENSOR_VAL_THRES) {
 		uint32_t now_micros = micros();
-		if (lv == 0)
-			prev_rise_micros = now_micros;
-		else if (now_micros >= prev_rise_micros + SENSOR_DUR_THRES_US) {
+		if (m_lv == 0)
+			m_prev_rise_micros = now_micros;
+		else if (now_micros >= m_prev_rise_micros + SENSOR_DUR_THRES_US) {
 			Serial.print(SQUASH_CMD_SENSOR_DETECTED);
 			stop();
 		}
-		lv = HIGH;
+		m_lv = HIGH;
 	} else {
-		lv = LOW;
+		m_lv = LOW;
 	}
 }
 
@@ -102,30 +104,30 @@ static active_indicator g_aind;
 /*--------------------------------------------------------------------*/
 class ir_transmitter {
 private:
-	uint8_t data[REMOCON_DATA_LEN];
-	int len;
+	uint8_t m_data[PCOPRS1_DATA_LEN];
+	int m_len;
 
 public:
-	void reset() { len = 0; }
+	void reset() { m_len = 0; }
 	int push(uint8_t c);
-	void transmit();
+	void transmit(int len);
 };
 
 int ir_transmitter::push(uint8_t c)
 {
-	data[len++] = c;
-	return len;
+	m_data[m_len++] = c;
+	return m_len;
 }
 
 // define 38kHz 1/3 duty signal
 #define HI_DUR_US	9
 #define LO_DUR_US	17
 
-void ir_transmitter::transmit()
+void ir_transmitter::transmit(int len)
 {
 	unsigned long cur_us = 0, end_us = 0;
 
-	for (int i = 0; i < REMOCON_DATA_LEN; i++) {
+	for (int i = 0; i < len; i++) {
 		for (int j = 0; j < 8; j++) {
 			// if the bit is set, transmit 38kHz wave for 100us.
 			// otherwise keep silent.
@@ -134,7 +136,7 @@ void ir_transmitter::transmit()
 			// for the timing accuracy.
 			// digitalWrite() seems to take some microseconds.
 
-			int val = (data[i] >> j) & 1;	// we get 0 or 1
+			int val = (m_data[i] >> j) & 1;	// we get 0 or 1
 
 			// port B: pin 8-13
 			// the shift count is (PIN_IR_OUT - 8)
@@ -158,10 +160,10 @@ void ir_transmitter::transmit()
 /*--------------------------------------------------------------------*/
 class ir_receiver {
 public:
-	void receive();
+	void receive(int len);
 };
 
-void ir_receiver::receive()
+void ir_receiver::receive(int len)
 {
 	// NOTE: active low
 	// FIXME: support cancel command
@@ -173,7 +175,7 @@ void ir_receiver::receive()
 	// start time
 	uint32_t us_prev = micros();
 
-	for (int i = 0; i < REMOCON_DATA_LEN; i++) {
+	for (int i = 0; i < len; i++) {
 		uint8_t rcv_byte = 0;
 		for (int j = 0; j < 8; j++) {
 			uint32_t us_next = us_prev + 100;
@@ -193,17 +195,17 @@ class state_machine {
 private:
 	enum {
 		ST_NONE = 0,
+		ST_TRANSMIT_SIZE,
 		ST_TRANSMIT_CH,
 		ST_TRANSMIT,
-		ST_RECEIVE,
-	};
-
-	ir_transmitter tr;
-	int state;
+		ST_RECEIVE_SIZE,
+	} m_state;
+	ir_transmitter m_tr;
+	int m_transmit_size;
 
 public:
 	state_machine() {
-		state = ST_NONE;
+		m_state = ST_NONE;
 	}
 	void serial_check();
 };
@@ -215,7 +217,7 @@ void state_machine::serial_check()
 
 	uint8_t c = Serial.read();
 
-	switch (state) {
+	switch (m_state) {
 	case ST_NONE:
 		switch (c) {
 		/* remocon commands */
@@ -225,16 +227,25 @@ void state_machine::serial_check()
 			return;
 		case REMOCON_CMD_TRANSMIT:
 			Serial.print(REMOCON_CMD_OK);
-			state = ST_TRANSMIT_CH;
+			m_transmit_size = PCOPRS1_DATA_LEN;
+			m_state = ST_TRANSMIT_CH;
+			return;
+		case REMOCON_CMD_TRANSMIT2:
+			Serial.print(REMOCON_CMD_OK);
+			m_state = ST_TRANSMIT_SIZE;
 			return;
 		case REMOCON_CMD_RECEIVE:
 			{
 				ir_receiver rc;
 				Serial.print(REMOCON_CMD_OK);
 				Serial.print(REMOCON_CMD_RECEIVE_DATA);
-				rc.receive();
+				rc.receive(PCOPRS1_DATA_LEN);
 				Serial.print(REMOCON_CMD_DATA_COMPLETION);
 			}
+			return;
+		case REMOCON_CMD_RECEIVE2:
+			Serial.print(REMOCON_CMD_OK);
+			m_state = ST_RECEIVE_SIZE;
 			return;
 		/* sensor commands */
 		case SQUASH_CMD_SENSOR_START:
@@ -248,26 +259,40 @@ void state_machine::serial_check()
 			return;
 		}
 		break;
+	case ST_TRANSMIT_SIZE:
+		Serial.print(REMOCON_CMD_OK);
+		m_transmit_size = (int)c * 16;
+		m_state = ST_TRANSMIT_CH;
+		return;
 	case ST_TRANSMIT_CH:
 		if ((c >= '1') && (c <= '4')) {
 			Serial.print(REMOCON_CMD_OK);
-			tr.reset();
-			state = ST_TRANSMIT;
+			m_tr.reset();
+			m_state = ST_TRANSMIT;
 			return;
 		}
 		break;
 	case ST_TRANSMIT:
-		if (tr.push(c) == REMOCON_DATA_LEN) {
-			tr.transmit();
+		if (m_tr.push(c) == PCOPRS1_DATA_LEN) {
+			m_tr.transmit(m_transmit_size);
 			Serial.print(REMOCON_CMD_DATA_COMPLETION);
-			state = ST_NONE;
+			m_state = ST_NONE;
+		}
+		return;
+	case ST_RECEIVE_SIZE:
+		{
+			ir_receiver rc;
+			Serial.print(REMOCON_CMD_OK);
+			Serial.print(REMOCON_CMD_RECEIVE_DATA);
+			rc.receive((int)c * 16);
+			Serial.print(REMOCON_CMD_DATA_COMPLETION);
 		}
 		return;
 	}
 
 	/* error. unknown command */
 	Serial.print('?');
-	state = ST_NONE;
+	m_state = ST_NONE;
 }
 
 /*--------------------------------------------------------------------*/
