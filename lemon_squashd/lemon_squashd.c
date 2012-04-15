@@ -16,6 +16,13 @@
 #include <netdb.h>
 #include "sensor_cmd.h"
 
+/* SENSOR: output */
+#define SERIAL_SQUASH_CMD_SENSOR_DETECTED	'P'
+/* SENSOR: input */
+#define SERIAL_SQUASH_CMD_SENSOR_START		'q'
+#define SERIAL_SQUASH_CMD_ACTIVE		'a'
+#define SERIAL_SQUASH_CMD_INACTIVE		'b'
+
 #define CMD_NAME		"lemon_squashd"
 #define REMOCON_PORT_STR	"26851"
 #define SENSOR_PORT_STR		"26852"
@@ -299,13 +306,13 @@ static int read_client_conn_sn(struct server_fds *fds)
 	} else {
 		switch (cmd_r) {
 		case SENSOR_CMD_START:
-			cmd_s = 'Q';
+			cmd_s = SERIAL_SQUASH_CMD_SENSOR_START;
 			break;
 		case SENSOR_CMD_ACTIVE:
-			cmd_s = 'A';
+			cmd_s = SERIAL_SQUASH_CMD_ACTIVE;
 			break;
 		case SENSOR_CMD_INACTIVE:
-			cmd_s = 'B';
+			cmd_s = SERIAL_SQUASH_CMD_INACTIVE;
 			break;
 		default:
 			syslog(LOG_ERR, "unknown command %d\n", cmd_r);
@@ -333,7 +340,7 @@ static int read_serial(struct server_fds *fds)
 	}
 
 	/* FIXME: more strict data parsing */
-	if ((r_len == 1) && (buf[0] == 'P')) {
+	if ((r_len == 1) && (buf[0] == SERIAL_SQUASH_CMD_SENSOR_DETECTED)) {
 		if (fds->fd_conn_sn < 0) {
 			syslog(LOG_ERR,
 			       "data at fd_ser, but no connection with"

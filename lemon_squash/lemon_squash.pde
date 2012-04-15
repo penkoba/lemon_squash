@@ -8,20 +8,24 @@
 #define PIN_ACTIVE_LED		 7
 #define ANALOG_PIN_RANGE_IN	 0
 
+/* REMOCON: output */
 #define REMOCON_CMD_DATA_COMPLETION	'E'
 #define REMOCON_CMD_LED_OK		'O'
 #define REMOCON_CMD_RECEIVE_DATA	'S'
 #define REMOCON_CMD_OK			'Y'
+/* REMOCON: input */
 #define REMOCON_CMD_RECEIVE_CANCEL	'c'
 #define REMOCON_CMD_LED			'i'
 #define REMOCON_CMD_RECEIVE		'r'
 #define REMOCON_CMD_TRANSMIT		't'
 #define REMOCON_CMD_CHANNEL(ch)		('0' + (ch))
 
-#define SQUASH_CMD_SENSOR_START		'Q'	/* input */
-#define SQUASH_CMD_SENSOR_DETECTED	'P'	/* output */
-#define SQUASH_CMD_ACTIVE		'A'	/* input */
-#define SQUASH_CMD_INACTIVE		'B'	/* input */
+/* SENSOR: output */
+#define SQUASH_CMD_SENSOR_DETECTED	'P'
+/* SENSOR: input */
+#define SQUASH_CMD_SENSOR_START		'q'
+#define SQUASH_CMD_ACTIVE		'a'
+#define SQUASH_CMD_INACTIVE		'b'
 
 #define REMOCON_DATA_LEN	240
 
