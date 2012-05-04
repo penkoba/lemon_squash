@@ -104,7 +104,7 @@ static active_indicator g_aind;
 /*--------------------------------------------------------------------*/
 class ir_transmitter {
 private:
-	uint8_t m_data[PCOPRS1_DATA_LEN];
+	uint8_t m_data[1500];
 	int m_len;
 
 public:
